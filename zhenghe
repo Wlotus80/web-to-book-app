@@ -1,0 +1,132 @@
+import os
+import re
+import time
+import requests
+from urllib.parse import urljoin, urlparse
+from bs4 import BeautifulSoup
+
+def clean_text(text):
+    """清理文本：去除多余空白、特殊字符等"""
+    text = re.sub(r'\s+', ' ', text)  # 合并多个空白符
+    text = text.strip()
+    return text
+
+def extract_main_content(soup):
+    """
+    尝试提取网页正文内容。
+    策略：优先找 <article>, <main>, 或包含大量段落的 <div>
+    """
+    # 方法1：找 article 或 main 标签
+    for tag in ['article', 'main']:
+        main = soup.find(tag)
+        if main:
+            return '\n\n'.join(p.get_text() for p in main.find_all('p'))
+    
+    # 方法2：找包含最多 <p> 的 div（常见于博客/小说站）
+    divs = soup.find_all('div')
+    best_div = None
+    max_p_count = 0
+    for div in divs:
+        p_count = len(div.find_all('p'))
+        if p_count > max_p_count:
+            max_p_count = p_count
+            best_div = div
+    
+    if best_div and max_p_count >= 1:
+        return '\n\n'.join(p.get_text() for p in best_div.find_all('p'))
+    
+    # 方法3：兜底：直接取所有 p
+    return '\n\n'.join(p.get_text() for p in soup.find_all('p'))
+
+def fetch_page(url, timeout=10):
+    """安全地获取网页内容"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+        }
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding
+        return resp.text
+    except Exception as e:
+        print(f"⚠️ 无法抓取 {url}: {e}")
+        return None
+
+def get_chapter_links(base_url, html):
+    """从目录页提取所有章节链接"""
+    soup = BeautifulSoup(html, 'lxml')
+    base_parsed = urlparse(base_url)
+    links = []
+
+    # 提取所有 a 标签
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        full_url = urljoin(base_url, href)
+        # 只保留同域名下的链接（避免跳转到外部网站）
+        if urlparse(full_url).netloc == base_parsed.netloc:
+            title = clean_text(a.get_text())
+            if title:  # 忽略空标题
+                links.append((title, full_url))
+    
+    # 去重（保留顺序）
+    seen = set()
+    unique_links = []
+    for title, url in links:
+        if url not in seen:
+            seen.add(url)
+            unique_links.append((title, url))
+    
+    return unique_links
+
+def web_to_book(book_url, output_file="book.txt"):
+    print(f"📖 开始生成书籍：{book_url}")
+    
+    # 1. 获取目录页
+    index_html = fetch_page(book_url)
+    if not index_html:
+        print("❌ 无法获取目录页")
+        return
+    
+    # 2. 提取章节链接
+    chapters = get_chapter_links(book_url, index_html)
+    if not chapters:
+        print("⚠️ 未找到任何章节链接，尝试直接提取当前页内容...")
+        soup = BeautifulSoup(index_html, 'lxml')
+        content = extract_main_content(soup)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+        print(f"✅ 已保存单页内容到 {output_file}")
+        return
+
+    print(f"📚 共找到 {len(chapters)} 个章节")
+
+    # 3. 抓取每个章节
+    book_content = []
+    for i, (title, url) in enumerate(chapters, 1):
+        print(f"  [{i}/{len(chapters)}] 正在抓取: {title[:30]}...")
+        html = fetch_page(url)
+        if not html:
+            continue
+        soup = BeautifulSoup(html, 'lxml')
+        content = extract_main_content(soup)
+        if content.strip():
+            book_content.append(f"\n\n第{i}章 {title}\n{'='*40}\n")
+            book_content.append(content)
+        time.sleep(0.5)  # 礼貌爬取，避免被封
+
+    # 4. 保存到文件
+    full_text = "\n".join(book_content)
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(full_text)
+    
+    print(f"✅ 书籍已生成！共 {len(book_content)//2} 章，保存为：{os.path.abspath(output_file)}")
+
+# ======================
+# 使用示例
+# ======================
+if __name__ == "__main__":
+    url = input("请输入书籍目录页的网址：").strip()
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    output_name = "my_book.txt"
+    web_to_book(url, output_name)
